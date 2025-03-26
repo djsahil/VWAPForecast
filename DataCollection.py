@@ -139,34 +139,36 @@ def compute_features(df):
     return df.drop(columns=["pv", "cumulative_pv"]).dropna()
 
 
-# --- Main Loop: Download + Feature Enrich + Save ---
+# --- Main Loop: Download + Feature Enrich + Save by Calendar Year ---
 for symbol in symbols:
-    symbol_data = []
     print(f"\nCollecting 5 years of intraday data for {symbol}...")
 
-    for i, date in enumerate(dates):
+    year_data = {}  # Dict to hold dataframes grouped by year
+
+    for date in dates:
         try:
             df = get_intraday_ohlcv(symbol, date, interval)
-            if not df.empty:
-                enriched = compute_features(df)
-                symbol_data.append(enriched)
+            if df.empty:
+                continue
 
-            # Save batch every 100 days
-            if i % 100 == 0 and symbol_data:
-                part_df = pd.concat(symbol_data)
-                part_df.to_csv(f"{output_dir}/{symbol}_part_{i}.csv", index=False)
-                print(f"Saved {symbol} part {i} with {len(part_df)} rows.")
-                symbol_data = []
+            enriched = compute_features(df)
+            year = pd.to_datetime(date).year
 
-            time.sleep(1.1)  # Respect API rate limits
+            if year not in year_data:
+                year_data[year] = []
+
+            year_data[year].append(enriched)
+
+            time.sleep(1.1)  # Avoid rate limits
 
         except Exception as e:
             print(f"Error for {symbol} on {date}: {e}")
             continue
 
-    if symbol_data:
-        final_df = pd.concat(symbol_data)
-        final_df.to_csv(f"{output_dir}/{symbol}_last_5_years_features.csv", index=False)
-        print(f"Final save: {symbol} | {len(final_df)} rows.")
-    else:
-        print(f"No data collected for {symbol}.")
+    # After all dates are processed, write one file per year
+    for year, data_chunks in sorted(year_data.items()):
+        if data_chunks:
+            year_df = pd.concat(data_chunks)
+            filepath = f"{output_dir}/{symbol}_{year}.csv"
+            year_df.to_csv(filepath, index=False)
+            print(f"Saved {symbol} {year} with {len(year_df)} rows.")
