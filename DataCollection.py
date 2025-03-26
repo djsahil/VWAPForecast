@@ -2,7 +2,7 @@
 Intraday OHLCV Feature Engineering Script for VWAP Forecasting
 --------------------------------------------------------------
 
-Authors: Sahil Shah
+Author: Sahil Shah
 Course: Financial Time Series (MQF)
 Project: VWAP Forecasting and Trading Signal Generation
 Data Source: Polygon.io (https://polygon.io)
@@ -31,8 +31,8 @@ Script Behavior:
 1. Connects to the Polygon.io API.
 2. Downloads 5-minute OHLCV bars for each symbol and each U.S. trading day over the past 5 years.
 3. Performs feature engineering and tagging of macro event days.
-4. Saves the enriched data to CSV files in batch chunks and final merged outputs.
-
+4. Saves the enriched data to CSV files, chunked by calendar year.
+5. Runs each symbol’s data pipeline in parallel using multithreading (max 4 concurrent threads).
 """
 
 import requests
@@ -40,6 +40,7 @@ import pandas as pd
 from datetime import datetime, timedelta
 import time
 import os
+import concurrent.futures
 
 # --- LOAD API KEY FROM FILE ---
 with open("./api_config/polygon_api_key.txt", "r") as f:
@@ -51,6 +52,9 @@ interval = "5"  # 5 Min Bars
 years_back = 5
 output_dir = "polygon_data"
 os.makedirs(output_dir, exist_ok=True)
+
+# Max number of threads to run in parallel
+MAX_THREADS = min(4, len(symbols))
 
 # --- HARDCODED MACRO EVENT DATES (used to flag important market days) ---
 # NEED TO REPLACE WITH DATES FROM FRED or etc.
@@ -64,7 +68,6 @@ macro_event_dates = [
     pd.to_datetime("2024-03-20").date(),
 ]
 
-
 # --- Function to Generate last N years of U.S. trading days ---
 def generate_trading_days(n_years):
     end = datetime.now()
@@ -72,9 +75,7 @@ def generate_trading_days(n_years):
     business_days = pd.date_range(start=start, end=end, freq="B")
     return [d.strftime('%Y-%m-%d') for d in business_days]
 
-
 dates = generate_trading_days(years_back)
-
 
 # --- Function to Download OHLCV intraday data for one symbol and one date ---
 def get_intraday_ohlcv(symbol, date, interval="5"):
@@ -103,7 +104,6 @@ def get_intraday_ohlcv(symbol, date, interval="5"):
     df["day_of_week"] = df["timestamp"].dt.weekday
     df.rename(columns={"o": "open", "h": "high", "l": "low", "c": "close", "v": "volume"}, inplace=True)
     return df[["symbol", "timestamp", "date", "time", "hour", "day_of_week", "open", "high", "low", "close", "volume"]]
-
 
 # --- Feature Engineering  ---
 def compute_features(df):
@@ -138,10 +138,9 @@ def compute_features(df):
     # Drop intermediate columns and rows with NaNs
     return df.drop(columns=["pv", "cumulative_pv"]).dropna()
 
-
-# --- Main Loop: Download + Feature Enrich + Save by Calendar Year ---
-for symbol in symbols:
-    print(f"\nCollecting 5 years of intraday data for {symbol}...")
+# --- Worker Function: Process One Symbol (downloads, enriches, saves) ---
+def process_symbol(symbol):
+    print(f"\n[START] Collecting 5 years of intraday data for {symbol}...")
 
     year_data = {}  # Dict to hold dataframes grouped by year
 
@@ -162,7 +161,7 @@ for symbol in symbols:
             time.sleep(1.1)  # Avoid rate limits
 
         except Exception as e:
-            print(f"Error for {symbol} on {date}: {e}")
+            print(f"[ERROR] {symbol} on {date}: {e}")
             continue
 
     # After all dates are processed, write one file per year
@@ -171,4 +170,20 @@ for symbol in symbols:
             year_df = pd.concat(data_chunks)
             filepath = f"{output_dir}/{symbol}_{year}.csv"
             year_df.to_csv(filepath, index=False)
-            print(f"Saved {symbol} {year} with {len(year_df)} rows.")
+            print(f"[SAVED] {symbol} {year} with {len(year_df)} rows.")
+
+    print(f"[DONE] Finished processing {symbol}.")
+
+# --- Multithreading: Run one thread per symbol ---
+print("Launching threads for each symbol...\n")
+
+with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_THREADS) as executor:
+    futures = [executor.submit(process_symbol, symbol) for symbol in symbols]
+
+    for future in concurrent.futures.as_completed(futures):
+        try:
+            future.result()
+        except Exception as e:
+            print(f"[THREAD ERROR] {e}")
+
+print("\nAll symbols processed.")
