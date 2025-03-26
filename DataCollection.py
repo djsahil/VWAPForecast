@@ -29,8 +29,7 @@ Key Features Created per Interval:
 Script Behavior:
 ----------------
 1. Connects to the Polygon.io API.
-2. Downloads 5-minute OHLCV bars for each symbol and each U.S. trading day
-   over the past 5 years.
+2. Downloads 5-minute OHLCV bars for each symbol and each U.S. trading day over the past 5 years.
 3. Performs feature engineering and tagging of macro event days.
 4. Saves the enriched data to CSV files in batch chunks and final merged outputs.
 
@@ -38,13 +37,15 @@ Script Behavior:
 
 import requests
 import pandas as pd
-import numpy as np
 from datetime import datetime, timedelta
 import time
 import os
 
-# --- API CONFIGURATION ---
-API_KEY_POLYGON = "oUSe4A__ttXGPcxtn0klhLZ0BhuHxYgk"
+# --- LOAD API KEY FROM FILE ---
+with open("./api_config/polygon_api_key.txt", "r") as f:
+    API_KEY_POLYGON = f.read().strip()
+
+# --- CONFIGURATION ---
 symbols = ["AAPL", "SPY", "PLTR", "XOM"]
 interval = "5"  # 5 Min Bars
 years_back = 5
@@ -138,32 +139,31 @@ def compute_features(df):
     return df.drop(columns=["pv", "cumulative_pv"]).dropna()
 
 
-# --- Main loop across all symbols and dates, with batching ---
+# --- Main Loop: Download + Feature Enrich + Save ---
 for symbol in symbols:
     symbol_data = []
     print(f"\nCollecting 5 years of intraday data for {symbol}...")
 
     for i, date in enumerate(dates):
         try:
-            df = get_intraday_ohlcv(symbol, date, interval)  # FETCH DATA
+            df = get_intraday_ohlcv(symbol, date, interval)
             if not df.empty:
-                enriched = compute_features(df)  # COMPUTE FEATURES (VWAP, etc)
-                symbol_data.append(enriched)  # ENRICH DATA SET WITH FEATURES
+                enriched = compute_features(df)
+                symbol_data.append(enriched)
 
-            # Save batch every 100 trading days to create chunks
+            # Save batch every 100 days
             if i % 100 == 0 and symbol_data:
                 part_df = pd.concat(symbol_data)
                 part_df.to_csv(f"{output_dir}/{symbol}_part_{i}.csv", index=False)
                 print(f"Saved {symbol} part {i} with {len(part_df)} rows.")
                 symbol_data = []
 
-            time.sleep(1.1)  # Adhere to Polygon's API rate limits
+            time.sleep(1.1)  # Respect API rate limits
 
         except Exception as e:
             print(f"Error for {symbol} on {date}: {e}")
             continue
 
-    # Final save after loop ends
     if symbol_data:
         final_df = pd.concat(symbol_data)
         final_df.to_csv(f"{output_dir}/{symbol}_last_5_years_features.csv", index=False)
