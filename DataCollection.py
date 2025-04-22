@@ -24,17 +24,19 @@ Key Features Created per Interval:
 - day_of_week: 0 = Monday, 4 = Friday
 - vwap: Real-time volume-weighted average price
 - vwap_deviation: Close minus VWAP (used for trading signal logic)
-- macro_event_day: Binary flag for major macroeconomic news days
+- is_cpi_day: 1 if the date matches a CPI release day, else 0
+- is_nfp_day: 1 if the date matches a Non-Farm Payroll release day, else 0
+- is_month_end: 1 if the date is the last trading day of the month, else 0
+- macro_event_day: Combined binary flag for CPI, NFP, or month-end
 
 Script Behavior:
 ----------------
 1. Connects to the Polygon.io API.
 2. Downloads 5-minute OHLCV bars for each symbol and each U.S. trading day over the past 5 years.
-3. Performs feature engineering and tagging of macro event days.
+3. Performs feature engineering and tagging of CPI, NFP, and month-end macro event days.
 4. Saves the enriched data to CSV files, chunked by calendar year.
 5. Runs each symbol’s data pipeline in parallel using multithreading (max 4 concurrent threads).
 """
-
 import requests
 import pandas as pd
 from datetime import datetime, timedelta
@@ -52,21 +54,17 @@ interval = "5"  # 5 Min Bars
 years_back = 5
 output_dir = "polygon_data"
 os.makedirs(output_dir, exist_ok=True)
-
-# Max number of threads to run in parallel
 MAX_THREADS = min(4, len(symbols))
 
-# --- HARDCODED MACRO EVENT DATES (used to flag important market days) ---
-# NEED TO REPLACE WITH DATES FROM FRED or etc.
-macro_event_dates = [
-    pd.to_datetime("2024-01-11").date(),
-    pd.to_datetime("2024-01-31").date(),
-    pd.to_datetime("2024-02-02").date(),
-    pd.to_datetime("2024-02-13").date(),
-    pd.to_datetime("2024-03-01").date(),
-    pd.to_datetime("2024-03-12").date(),
-    pd.to_datetime("2024-03-20").date(),
-]
+# --- LOAD MACRO EVENT DATES FROM EXCEL FILE ---
+macro_events = pd.read_excel("./macro_dates/macro_dates.xlsx")
+print("Loaded macro events!")
+
+# Convert columns to datetime.date
+macro_events["CPI"] = pd.to_datetime(macro_events["CPI"]).dt.date
+macro_events["NFP"] = pd.to_datetime(macro_events["NFP"]).dt.date
+macro_events["month_end"] = pd.to_datetime(macro_events["month_end"]).dt.date
+
 
 # --- Function to Generate last N years of U.S. trading days ---
 def generate_trading_days(n_years):
@@ -105,37 +103,25 @@ def get_intraday_ohlcv(symbol, date, interval="5"):
     df.rename(columns={"o": "open", "h": "high", "l": "low", "c": "close", "v": "volume"}, inplace=True)
     return df[["symbol", "timestamp", "date", "time", "hour", "day_of_week", "open", "high", "low", "close", "volume"]]
 
-# --- Feature Engineering  ---
+# --- Feature Engineering ---
 def compute_features(df):
     df.sort_values(['symbol', 'timestamp'], inplace=True)
-
-    # Cumulative volume traded so far during the day
     df['cumulative_volume'] = df.groupby(['symbol', 'date'])['volume'].cumsum()
-
-    # Return since last interval (close-to-close percentage change)
     df['price_return'] = df.groupby(['symbol', 'date'])['close'].pct_change()
-
-    # Realized volatility up to the current time (expanding std dev of returns)
     df['intraday_volatility'] = df.groupby(['symbol', 'date'])['price_return'].transform(lambda x: x.expanding().std())
-
-    # Price trend: difference between current close and the day's opening price
     df['price_trend'] = df['close'] - df.groupby(['symbol', 'date'])['open'].transform('first')
-
-    # Time of day in decimal (e.g., 10:30 AM → 10.5)
     df['time_of_day'] = df['hour']
 
-    # Binary flag for macroeconomic announcement day
-    df['macro_event_day'] = df['date'].isin(macro_event_dates).astype(int)
+    # Macro event tagging
+    df['is_cpi_day'] = df['date'].isin(macro_events["CPI"]).astype(int)
+    df['is_nfp_day'] = df['date'].isin(macro_events["NFP"]).astype(int)
+    df['is_month_end'] = df['date'].isin(macro_events["month_end"]).astype(int)
+    df['macro_event_day'] = ((df['is_cpi_day'] + df['is_nfp_day'] + df['is_month_end']) > 0).astype(int)
 
-    # VWAP = cumulative (price × volume) / cumulative volume
     df['pv'] = df['close'] * df['volume']
     df['cumulative_pv'] = df.groupby(['symbol', 'date'])['pv'].cumsum()
     df['vwap'] = df['cumulative_pv'] / df['cumulative_volume']
-
-    # VWAP Deviation: actual close minus VWAP
     df['vwap_deviation'] = df['close'] - df['vwap']
-
-    # Drop intermediate columns and rows with NaNs
     return df.drop(columns=["pv", "cumulative_pv"]).dropna()
 
 # --- Worker Function: Process One Symbol (downloads, enriches, saves) ---
